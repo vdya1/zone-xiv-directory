@@ -16,6 +16,16 @@
   
   <!-- Core Stylesheet -->
   <link rel="stylesheet" href="css/styles.css" />
+  
+  <!-- Immediate Theme Restoration Script (prevents flashing) -->
+  <script>
+    (function() {
+      const savedTheme = localStorage.getItem("theme");
+      if (savedTheme === "light") {
+        document.documentElement.setAttribute("data-theme", "light");
+      }
+    })();
+  </script>
 </head>
 <body>
 
@@ -31,23 +41,33 @@
         </div>
       </a>
 
-      <!-- Hamburger toggle for mobile -->
-      <button class="menu-toggle" id="mobile-menu-toggle" aria-label="Toggle Menu">
-        &#9776;
-      </button>
+      <!-- Actions on the right (Nav + Theme Toggle + Mobile Menu) -->
+      <div style="display: flex; align-items: center; gap: 1.25rem;">
+        <!-- Desktop & Mobile Responsive Navigation -->
+        <nav id="header-nav">
+          <a href="#/">Home</a>
+          <a href="#/directory" onclick="clearFiltersAndBrowse()">Directory</a>
+          <a href="#/register">Register Business</a>
+          <a href="#/contact">Contact Us</a>
+          
+          <!-- Auth state context buttons -->
+          <div id="header-auth-controls" class="nav-buttons" style="margin-left: 0.5rem;">
+            <!-- Loaded dynamically via app.js -->
+          </div>
+        </nav>
 
-      <!-- Desktop & Mobile Responsive Navigation -->
-      <nav id="header-nav">
-        <a href="#/">Home</a>
-        <a href="#/directory" onclick="clearFiltersAndBrowse()">Directory</a>
-        <a href="#/register">Register Business</a>
-        <a href="#/contact">Contact Us</a>
-        
-        <!-- Auth state context buttons -->
-        <div id="header-auth-controls" class="nav-buttons" style="margin-left: 0.5rem;">
-          <!-- Loaded dynamically via app.js -->
-        </div>
-      </nav>
+        <!-- Theme Toggle Button -->
+        <button class="theme-toggle-btn" id="theme-toggle" aria-label="Toggle Theme">
+          <svg id="theme-icon" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" style="width: 20px; height: 20px;">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z" />
+          </svg>
+        </button>
+
+        <!-- Hamburger toggle for mobile -->
+        <button class="menu-toggle" id="mobile-menu-toggle" aria-label="Toggle Menu">
+          &#9776;
+        </button>
+      </div>
     </div>
   </header>
 
@@ -140,6 +160,43 @@
           });
         });
       }
+    });
+  </script>
+
+  <!-- Theme Toggle Controller -->
+  <script>
+    document.addEventListener("DOMContentLoaded", () => {
+      const toggleBtn = document.getElementById("theme-toggle");
+      const themeIcon = document.getElementById("theme-icon");
+      
+      const moonPath = "M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z";
+      const sunPath = "M12 3v1m0 16v1m9-9h-1M4 12H3m15.364-6.364l-.707.707M6.343 17.657l-.707.707m12.728 0l-.707-.707M6.343 6.343l-.707-.707M14 12a2 2 0 11-4 0 2 2 0 014 0z";
+      
+      function updateIcon(theme) {
+        if (theme === "light") {
+          themeIcon.innerHTML = `<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="${sunPath}" />`;
+        } else {
+          themeIcon.innerHTML = `<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="${moonPath}" />`;
+        }
+      }
+      
+      // Init theme icon
+      const currentTheme = document.documentElement.getAttribute("data-theme") || "dark";
+      updateIcon(currentTheme);
+      
+      toggleBtn.addEventListener("click", () => {
+        const theme = document.documentElement.getAttribute("data-theme") === "light" ? "dark" : "light";
+        
+        if (theme === "light") {
+          document.documentElement.setAttribute("data-theme", "light");
+          localStorage.setItem("theme", "light");
+        } else {
+          document.documentElement.removeAttribute("data-theme");
+          localStorage.setItem("theme", "dark");
+        }
+        
+        updateIcon(theme);
+      });
     });
   </script>
 </body>
