@@ -1,7 +1,8 @@
-// Centralized Node.js Express Server for Zone XIV Business Directory (MongoDB Edition)
+// Centralized Dual-Database Express Server for Zone XIV Business Directory
 const express = require("express");
 const cors = require("cors");
 const mongoose = require("mongoose");
+const fs = require("fs").promises;
 const path = require("path");
 
 const app = express();
@@ -217,16 +218,19 @@ const INITIAL_DATA = {
 };
 
 // ----------------------------------------
-// MONGOOSE SCHEMAS & MODELS
+// DATABASE DETECTOR CONFIG
 // ----------------------------------------
-const CategorySchema = new mongoose.Schema({
-  name: { type: String, required: true, unique: true }
-});
+const MONGODB_URI = process.env.MONGODB_URI;
+let dbMode = "file"; // Fallback Mode
+
+const DB_DIR = path.join(__dirname, "data");
+const DB_PATH = path.join(DB_DIR, "database.json");
+
+// MongoDB Schemas
+const CategorySchema = new mongoose.Schema({ name: { type: String, required: true, unique: true } });
 const Category = mongoose.model("Category", CategorySchema);
 
-const ChapterSchema = new mongoose.Schema({
-  name: { type: String, required: true, unique: true }
-});
+const ChapterSchema = new mongoose.Schema({ name: { type: String, required: true, unique: true } });
 const Chapter = mongoose.model("Chapter", ChapterSchema);
 
 const BusinessSchema = new mongoose.Schema({
@@ -256,63 +260,80 @@ const BusinessSchema = new mongoose.Schema({
 });
 const Business = mongoose.model("Business", BusinessSchema);
 
-// Database Seeding Logic
-async function seedDatabase() {
-  try {
-    const businessCount = await Business.countDocuments();
-    if (businessCount === 0) {
-      console.log("Database is empty. Initiating seeding...");
-
-      // Seed Categories
-      for (const name of INITIAL_DATA.categories) {
-        await Category.findOneAndUpdate({ name }, { name }, { upsert: true });
+// DB Initialization Setup
+async function initDatabase() {
+  if (MONGODB_URI) {
+    dbMode = "mongodb";
+    console.log("Connecting to Cloud Database: MongoDB Atlas...");
+    try {
+      await mongoose.connect(MONGODB_URI);
+      console.log("Connected to MongoDB Atlas successfully.");
+      
+      // Auto-Seed MongoDB
+      const businessCount = await Business.countDocuments();
+      if (businessCount === 0) {
+        console.log("MongoDB is empty. Seeding starter data...");
+        for (const name of INITIAL_DATA.categories) {
+          await Category.findOneAndUpdate({ name }, { name }, { upsert: true });
+        }
+        for (const name of INITIAL_DATA.chapters) {
+          await Chapter.findOneAndUpdate({ name }, { name }, { upsert: true });
+        }
+        for (const b of INITIAL_DATA.businesses) {
+          await Business.create(b);
+        }
+        console.log("MongoDB Seeding completed.");
       }
-
-      // Seed Chapters
-      for (const name of INITIAL_DATA.chapters) {
-        await Chapter.findOneAndUpdate({ name }, { name }, { upsert: true });
-      }
-
-      // Seed Businesses
-      for (const b of INITIAL_DATA.businesses) {
-        await Business.create(b);
-      }
-
-      console.log("Database seeded successfully with starter entries.");
+    } catch (err) {
+      console.error("MongoDB Atlas connection failed! Falling back to Local File Mode.", err);
+      dbMode = "file";
+      await initLocalJsonFile();
     }
-  } catch (err) {
-    console.error("Database seeding failed:", err);
+  } else {
+    dbMode = "file";
+    console.log("No MONGODB_URI detected. Running in Local JSON File Mode.");
+    await initLocalJsonFile();
   }
 }
 
-// Connect to MongoDB (with local fallback for local development)
-const MONGODB_URI = process.env.MONGODB_URI || "mongodb://localhost:27017/zone_xiv_db";
-console.log("Connecting to MongoDB...");
+async function initLocalJsonFile() {
+  try {
+    await fs.mkdir(DB_DIR, { recursive: true });
+    try {
+      await fs.access(DB_PATH);
+    } catch {
+      await fs.writeFile(DB_PATH, JSON.stringify(INITIAL_DATA, null, 2), "utf8");
+      console.log("Local database.json file seeded successfully.");
+    }
+  } catch (err) {
+    console.error("Local file system database initialization failed:", err);
+  }
+}
 
-mongoose
-  .connect(MONGODB_URI)
-  .then(() => {
-    console.log("Connected to MongoDB successfully.");
-    seedDatabase();
-  })
-  .catch(err => {
-    console.error("MongoDB connection error:", err);
-  });
+// Local File Database Helper CRUDs
+async function readLocalFile() {
+  const data = await fs.readFile(DB_PATH, "utf8");
+  return JSON.parse(data);
+}
 
-// Admin Route Verification Middleware
+async function writeLocalFile(data) {
+  await fs.writeFile(DB_PATH, JSON.stringify(data, null, 2), "utf8");
+}
+
+// ----------------------------------------
+// UNIVERSAL API IMPLEMENTATION
+// ----------------------------------------
+
+// Admin verification middleware
 function verifyAdmin(req, res, next) {
   if (req.headers["x-admin-auth"] === "true") {
     next();
   } else {
-    res.status(401).json({ success: false, message: "Unauthorized access: admin privileges required." });
+    res.status(401).json({ success: false, message: "Unauthorized access: admin credentials required." });
   }
 }
 
-// ----------------------------------------
-// API ENDPOINTS (MONGODB BACKED)
-// ----------------------------------------
-
-// --- Auth ---
+// --- Admin Login ---
 app.post("/api/admin/login", (req, res) => {
   const { username, password } = req.body;
   if (username === "admin" && password === "Admin@123") {
@@ -322,12 +343,18 @@ app.post("/api/admin/login", (req, res) => {
   }
 });
 
-// --- Businesses ---
+// --- Businesses Routing ---
 // 1. Get approved businesses (Public)
 app.get("/api/businesses", async (req, res) => {
   try {
-    const approved = await Business.find({ status: "approved" }).sort({ registeredAt: -1 });
-    res.json(approved);
+    if (dbMode === "mongodb") {
+      const approved = await Business.find({ status: "approved" }).sort({ registeredAt: -1 });
+      res.json(approved);
+    } else {
+      const db = await readLocalFile();
+      const approved = db.businesses.filter(b => b.status === "approved");
+      res.json(approved);
+    }
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
@@ -336,8 +363,13 @@ app.get("/api/businesses", async (req, res) => {
 // 2. Get all businesses (Admin only)
 app.get("/api/businesses/all", verifyAdmin, async (req, res) => {
   try {
-    const businesses = await Business.find().sort({ registeredAt: -1 });
-    res.json(businesses);
+    if (dbMode === "mongodb") {
+      const businesses = await Business.find().sort({ registeredAt: -1 });
+      res.json(businesses);
+    } else {
+      const db = await readLocalFile();
+      res.json(db.businesses);
+    }
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
@@ -346,11 +378,15 @@ app.get("/api/businesses/all", verifyAdmin, async (req, res) => {
 // 3. Get single business profile (Public)
 app.get("/api/businesses/:id", async (req, res) => {
   try {
-    const business = await Business.findOne({ id: req.params.id });
-    if (business) {
-      res.json(business);
+    if (dbMode === "mongodb") {
+      const business = await Business.findOne({ id: req.params.id });
+      if (business) res.json(business);
+      else res.status(404).json({ success: false, message: "Business not found" });
     } else {
-      res.status(404).json({ success: false, message: "Business not found" });
+      const db = await readLocalFile();
+      const business = db.businesses.find(b => b.id === req.params.id);
+      if (business) res.json(business);
+      else res.status(404).json({ success: false, message: "Business not found" });
     }
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
@@ -360,22 +396,40 @@ app.get("/api/businesses/:id", async (req, res) => {
 // 4. Register new business (Public)
 app.post("/api/businesses", async (req, res) => {
   try {
-    // Generate unique numerical ZX ID based on maximum numeric ID in DB
-    const allBusinesses = await Business.find({}, { id: 1 });
-    const ids = allBusinesses.map(b => parseInt(b.id.replace("ZX-", "")));
-    const maxId = ids.length > 0 ? Math.max(...ids) : 1000;
-    const newId = `ZX-${maxId + 1}`;
+    let newId = "";
+    
+    if (dbMode === "mongodb") {
+      const allB = await Business.find({}, { id: 1 });
+      const ids = allB.map(b => parseInt(b.id.replace("ZX-", "")));
+      const maxId = ids.length > 0 ? Math.max(...ids) : 1000;
+      newId = `ZX-${maxId + 1}`;
 
-    const newBusiness = new Business({
-      ...req.body,
-      id: newId,
-      status: req.body.status || "pending",
-      isFeatured: req.body.isFeatured || false,
-      registeredAt: new Date()
-    });
+      const newB = new Business({
+        ...req.body,
+        id: newId,
+        status: req.body.status || "pending",
+        isFeatured: req.body.isFeatured || false,
+        registeredAt: new Date()
+      });
+      await newB.save();
+      res.status(201).json(newB);
+    } else {
+      const db = await readLocalFile();
+      const ids = db.businesses.map(b => parseInt(b.id.replace("ZX-", "")));
+      const maxId = ids.length > 0 ? Math.max(...ids) : 1000;
+      newId = `ZX-${maxId + 1}`;
 
-    await newBusiness.save();
-    res.status(201).json(newBusiness);
+      const newBusiness = {
+        ...req.body,
+        id: newId,
+        status: req.body.status || "pending",
+        isFeatured: req.body.isFeatured || false,
+        registeredAt: new Date().toISOString()
+      };
+      db.businesses.push(newBusiness);
+      await writeLocalFile(db);
+      res.status(201).json(newBusiness);
+    }
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
@@ -384,16 +438,24 @@ app.post("/api/businesses", async (req, res) => {
 // 5. Update business details (Admin only)
 app.put("/api/businesses/:id", verifyAdmin, async (req, res) => {
   try {
-    const result = await Business.findOneAndUpdate(
-      { id: req.params.id },
-      { $set: req.body },
-      { new: true }
-    );
-    
-    if (result) {
-      res.json({ success: true, business: result });
+    if (dbMode === "mongodb") {
+      const result = await Business.findOneAndUpdate(
+        { id: req.params.id },
+        { $set: req.body },
+        { new: true }
+      );
+      if (result) res.json({ success: true, business: result });
+      else res.status(404).json({ success: false, message: "Business not found" });
     } else {
-      res.status(404).json({ success: false, message: "Business listing not found" });
+      const db = await readLocalFile();
+      const idx = db.businesses.findIndex(b => b.id === req.params.id);
+      if (idx !== -1) {
+        db.businesses[idx] = { ...db.businesses[idx], ...req.body };
+        await writeLocalFile(db);
+        res.json({ success: true, business: db.businesses[idx] });
+      } else {
+        res.status(404).json({ success: false, message: "Business not found" });
+      }
     }
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
@@ -403,11 +465,20 @@ app.put("/api/businesses/:id", verifyAdmin, async (req, res) => {
 // 6. Delete business listing (Admin only)
 app.delete("/api/businesses/:id", verifyAdmin, async (req, res) => {
   try {
-    const result = await Business.findOneAndDelete({ id: req.params.id });
-    if (result) {
-      res.json({ success: true, message: "Business deleted successfully" });
+    if (dbMode === "mongodb") {
+      const result = await Business.findOneAndDelete({ id: req.params.id });
+      if (result) res.json({ success: true, message: "Business deleted successfully" });
+      else res.status(404).json({ success: false, message: "Business not found" });
     } else {
-      res.status(404).json({ success: false, message: "Business listing not found" });
+      const db = await readLocalFile();
+      const idx = db.businesses.findIndex(b => b.id === req.params.id);
+      if (idx !== -1) {
+        db.businesses.splice(idx, 1);
+        await writeLocalFile(db);
+        res.json({ success: true, message: "Business deleted successfully" });
+      } else {
+        res.status(404).json({ success: false, message: "Business not found" });
+      }
     }
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
@@ -417,8 +488,13 @@ app.delete("/api/businesses/:id", verifyAdmin, async (req, res) => {
 // --- Categories ---
 app.get("/api/categories", async (req, res) => {
   try {
-    const cats = await Category.find().sort({ name: 1 });
-    res.json(cats.map(c => c.name));
+    if (dbMode === "mongodb") {
+      const cats = await Category.find().sort({ name: 1 });
+      res.json(cats.map(c => c.name));
+    } else {
+      const db = await readLocalFile();
+      res.json(db.categories);
+    }
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
@@ -427,14 +503,22 @@ app.get("/api/categories", async (req, res) => {
 app.post("/api/categories", verifyAdmin, async (req, res) => {
   try {
     const name = req.body.name.trim();
-    if (!name) return res.status(400).json({ success: false, message: "Invalid category name" });
+    if (!name) return res.status(400).json({ success: false, message: "Category name required" });
 
-    const existing = await Category.findOne({ name });
-    if (existing) return res.status(400).json({ success: false, message: "Category already exists" });
+    if (dbMode === "mongodb") {
+      const existing = await Category.findOne({ name });
+      if (existing) return res.status(400).json({ success: false, message: "Category exists" });
 
-    await Category.create({ name });
-    const allCats = await Category.find().sort({ name: 1 });
-    res.json({ success: true, categories: allCats.map(c => c.name) });
+      await Category.create({ name });
+      const cats = await Category.find().sort({ name: 1 });
+      res.json({ success: true, categories: cats.map(c => c.name) });
+    } else {
+      const db = await readLocalFile();
+      if (db.categories.includes(name)) return res.status(400).json({ success: false, message: "Category exists" });
+      db.categories.push(name);
+      await writeLocalFile(db);
+      res.json({ success: true, categories: db.categories });
+    }
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
@@ -444,18 +528,28 @@ app.put("/api/categories", verifyAdmin, async (req, res) => {
   try {
     const { oldName, newName } = req.body;
     const cleanNew = newName.trim();
-    
-    const existing = await Category.findOne({ name: cleanNew });
-    if (existing) return res.status(400).json({ success: false, message: "Category name already exists" });
 
-    const result = await Category.findOneAndUpdate({ name: oldName }, { name: cleanNew });
-    if (result) {
-      // Cascade update to all businesses using this category
+    if (dbMode === "mongodb") {
+      const existing = await Category.findOne({ name: cleanNew });
+      if (existing) return res.status(400).json({ success: false, message: "Category name exists" });
+
+      await Category.findOneAndUpdate({ name: oldName }, { name: cleanNew });
       await Business.updateMany({ businessCategory: oldName }, { businessCategory: cleanNew });
-      const allCats = await Category.find().sort({ name: 1 });
-      res.json({ success: true, categories: allCats.map(c => c.name) });
+      const cats = await Category.find().sort({ name: 1 });
+      res.json({ success: true, categories: cats.map(c => c.name) });
     } else {
-      res.status(404).json({ success: false, message: "Category not found" });
+      const db = await readLocalFile();
+      const idx = db.categories.indexOf(oldName);
+      if (idx !== -1 && !db.categories.includes(cleanNew)) {
+        db.categories[idx] = cleanNew;
+        db.businesses.forEach(b => {
+          if (b.businessCategory === oldName) b.businessCategory = cleanNew;
+        });
+        await writeLocalFile(db);
+        res.json({ success: true, categories: db.categories });
+      } else {
+        res.status(400).json({ success: false, message: "Category name exists or invalid" });
+      }
     }
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
@@ -464,14 +558,24 @@ app.put("/api/categories", verifyAdmin, async (req, res) => {
 
 app.delete("/api/categories/:name", verifyAdmin, async (req, res) => {
   try {
-    const result = await Category.findOneAndDelete({ name: req.params.name });
-    if (result) {
-      // Unset category in affected businesses
+    if (dbMode === "mongodb") {
+      await Category.findOneAndDelete({ name: req.params.name });
       await Business.updateMany({ businessCategory: req.params.name }, { businessCategory: "" });
-      const allCats = await Category.find().sort({ name: 1 });
-      res.json({ success: true, categories: allCats.map(c => c.name) });
+      const cats = await Category.find().sort({ name: 1 });
+      res.json({ success: true, categories: cats.map(c => c.name) });
     } else {
-      res.status(404).json({ success: false, message: "Category not found" });
+      const db = await readLocalFile();
+      const idx = db.categories.indexOf(req.params.name);
+      if (idx !== -1) {
+        db.categories.splice(idx, 1);
+        db.businesses.forEach(b => {
+          if (b.businessCategory === req.params.name) b.businessCategory = "";
+        });
+        await writeLocalFile(db);
+        res.json({ success: true, categories: db.categories });
+      } else {
+        res.status(404).json({ success: false, message: "Category not found" });
+      }
     }
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
@@ -481,8 +585,13 @@ app.delete("/api/categories/:name", verifyAdmin, async (req, res) => {
 // --- Chapters ---
 app.get("/api/chapters", async (req, res) => {
   try {
-    const chaps = await Chapter.find().sort({ name: 1 });
-    res.json(chaps.map(c => c.name));
+    if (dbMode === "mongodb") {
+      const chaps = await Chapter.find().sort({ name: 1 });
+      res.json(chaps.map(c => c.name));
+    } else {
+      const db = await readLocalFile();
+      res.json(db.chapters);
+    }
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
@@ -493,12 +602,20 @@ app.post("/api/chapters", verifyAdmin, async (req, res) => {
     const name = req.body.name.trim();
     if (!name) return res.status(400).json({ success: false, message: "Invalid chapter name" });
 
-    const existing = await Chapter.findOne({ name });
-    if (existing) return res.status(400).json({ success: false, message: "Chapter already exists" });
+    if (dbMode === "mongodb") {
+      const existing = await Chapter.findOne({ name });
+      if (existing) return res.status(400).json({ success: false, message: "Chapter exists" });
 
-    await Chapter.create({ name });
-    const allChaps = await Chapter.find().sort({ name: 1 });
-    res.json({ success: true, chapters: allChaps.map(c => c.name) });
+      await Chapter.create({ name });
+      const chaps = await Chapter.find().sort({ name: 1 });
+      res.json({ success: true, chapters: chaps.map(c => c.name) });
+    } else {
+      const db = await readLocalFile();
+      if (db.chapters.includes(name)) return res.status(400).json({ success: false, message: "Chapter exists" });
+      db.chapters.push(name);
+      await writeLocalFile(db);
+      res.json({ success: true, chapters: db.chapters });
+    }
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
@@ -509,16 +626,27 @@ app.put("/api/chapters", verifyAdmin, async (req, res) => {
     const { oldName, newName } = req.body;
     const cleanNew = newName.trim();
 
-    const existing = await Chapter.findOne({ name: cleanNew });
-    if (existing) return res.status(400).json({ success: false, message: "Chapter name already exists" });
+    if (dbMode === "mongodb") {
+      const existing = await Chapter.findOne({ name: cleanNew });
+      if (existing) return res.status(400).json({ success: false, message: "Chapter exists" });
 
-    const result = await Chapter.findOneAndUpdate({ name: oldName }, { name: cleanNew });
-    if (result) {
+      await Chapter.findOneAndUpdate({ name: oldName }, { name: cleanNew });
       await Business.updateMany({ chapterName: oldName }, { chapterName: cleanNew });
-      const allChaps = await Chapter.find().sort({ name: 1 });
-      res.json({ success: true, chapters: allChaps.map(c => c.name) });
+      const chaps = await Chapter.find().sort({ name: 1 });
+      res.json({ success: true, chapters: chaps.map(c => c.name) });
     } else {
-      res.status(404).json({ success: false, message: "Chapter not found" });
+      const db = await readLocalFile();
+      const idx = db.chapters.indexOf(oldName);
+      if (idx !== -1 && !db.chapters.includes(cleanNew)) {
+        db.chapters[idx] = cleanNew;
+        db.businesses.forEach(b => {
+          if (b.chapterName === oldName) b.chapterName = cleanNew;
+        });
+        await writeLocalFile(db);
+        res.json({ success: true, chapters: db.chapters });
+      } else {
+        res.status(400).json({ success: false, message: "Chapter exists or invalid" });
+      }
     }
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
@@ -527,13 +655,24 @@ app.put("/api/chapters", verifyAdmin, async (req, res) => {
 
 app.delete("/api/chapters/:name", verifyAdmin, async (req, res) => {
   try {
-    const result = await Chapter.findOneAndDelete({ name: req.params.name });
-    if (result) {
+    if (dbMode === "mongodb") {
+      await Chapter.findOneAndDelete({ name: req.params.name });
       await Business.updateMany({ chapterName: req.params.name }, { chapterName: "" });
-      const allChaps = await Chapter.find().sort({ name: 1 });
-      res.json({ success: true, chapters: allChaps.map(c => c.name) });
+      const chaps = await Chapter.find().sort({ name: 1 });
+      res.json({ success: true, chapters: chaps.map(c => c.name) });
     } else {
-      res.status(404).json({ success: false, message: "Chapter not found" });
+      const db = await readLocalFile();
+      const idx = db.chapters.indexOf(req.params.name);
+      if (idx !== -1) {
+        db.chapters.splice(idx, 1);
+        db.businesses.forEach(b => {
+          if (b.chapterName === req.params.name) b.chapterName = "";
+        });
+        await writeLocalFile(db);
+        res.json({ success: true, chapters: db.chapters });
+      } else {
+        res.status(404).json({ success: false, message: "Chapter not found" });
+      }
     }
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
@@ -543,17 +682,21 @@ app.delete("/api/chapters/:name", verifyAdmin, async (req, res) => {
 // --- Backup & Restore ---
 app.get("/api/admin/backup", verifyAdmin, async (req, res) => {
   try {
-    const [businesses, categories, chapters] = await Promise.all([
-      Business.find(),
-      Category.find().sort({ name: 1 }),
-      Chapter.find().sort({ name: 1 })
-    ]);
-    
-    res.json({
-      businesses,
-      categories: categories.map(c => c.name),
-      chapters: chapters.map(c => c.name)
-    });
+    if (dbMode === "mongodb") {
+      const [businesses, categories, chapters] = await Promise.all([
+        Business.find(),
+        Category.find().sort({ name: 1 }),
+        Chapter.find().sort({ name: 1 })
+      ]);
+      res.json({
+        businesses,
+        categories: categories.map(c => c.name),
+        chapters: chapters.map(c => c.name)
+      });
+    } else {
+      const db = await readLocalFile();
+      res.json(db);
+    }
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
@@ -562,26 +705,20 @@ app.get("/api/admin/backup", verifyAdmin, async (req, res) => {
 app.post("/api/admin/restore", verifyAdmin, async (req, res) => {
   try {
     const { businesses, categories, chapters } = req.body;
-
     if (Array.isArray(businesses) && Array.isArray(categories) && Array.isArray(chapters)) {
-      // Clear current data completely
-      await Promise.all([
-        Business.deleteMany({}),
-        Category.deleteMany({}),
-        Chapter.deleteMany({})
-      ]);
-
-      // Re-insert Restore elements
-      if (categories.length > 0) {
-        await Category.insertMany(categories.map(name => ({ name })));
+      if (dbMode === "mongodb") {
+        await Promise.all([
+          Business.deleteMany({}),
+          Category.deleteMany({}),
+          Chapter.deleteMany({})
+        ]);
+        if (categories.length > 0) await Category.insertMany(categories.map(name => ({ name })));
+        if (chapters.length > 0) await Chapter.insertMany(chapters.map(name => ({ name })));
+        if (businesses.length > 0) await Business.insertMany(businesses);
+      } else {
+        const db = { businesses, categories, chapters };
+        await writeLocalFile(db);
       }
-      if (chapters.length > 0) {
-        await Chapter.insertMany(chapters.map(name => ({ name })));
-      }
-      if (businesses.length > 0) {
-        await Business.insertMany(businesses);
-      }
-
       res.json({ success: true, message: "Database restored successfully" });
     } else {
       res.status(400).json({ success: false, message: "Invalid backup database format payload" });
@@ -591,9 +728,12 @@ app.post("/api/admin/restore", verifyAdmin, async (req, res) => {
   }
 });
 
-// Start Server listening
-app.listen(PORT, () => {
-  console.log(`=================================================`);
-  console.log(`Zone XIV MongoDB-Backend running at port: ${PORT}`);
-  console.log(`=================================================`);
+// Start Server listening and initialize database mode
+initDatabase().then(() => {
+  app.listen(PORT, () => {
+    console.log(`=================================================`);
+    console.log(`Zone XIV Backend running on port: ${PORT}`);
+    console.log(`Database Mode: [${dbMode.toUpperCase()}]`);
+    console.log(`=================================================`);
+  });
 });
