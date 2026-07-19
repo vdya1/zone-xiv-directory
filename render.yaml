@@ -8,3 +8,5 @@ services:
     envVars:
       - key: PORT
         value: 8080
+      - key: MONGODB_URI
+        sync: false # Prompts the user for the connection string during deployment
